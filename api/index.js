@@ -34,7 +34,7 @@ export default async function handler(req, res) {
       return jsonExit(res, { status: "error", message: "Key expired or invalid" }, 401);
     }
 
-    const apiUrl = `https://ox.taitaninfo.workers.dev/?mobile=${encodeURIComponent(number)}`;
+    const apiUrl = `https://demon.taitanx.workers.dev/?mobile=${encodeURIComponent(number)}`;
     const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
     let upstreamResp;
